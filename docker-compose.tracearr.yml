@@ -1,0 +1,106 @@
+# Tracearr - PostgreSQL 18 Deployment
+#
+# DEPLOY:
+#   docker compose -f docker-compose.tracearr.yml up -d
+#
+# REQUIRED ENVIRONMENT VARIABLES (set in .env):
+#   JWT_SECRET, COOKIE_SECRET, DB_PASSWORD
+#
+# POSTER CACHE (required since Tracearr 2.5.0):
+#   The standard image writes its poster cache to IMAGE_CACHE_DIR
+#   (/data/tracearr/image-cache). That path MUST be on a volume or the
+#   cache lives in the container's writable layer and every poster is
+#   re-downloaded from the media server after each container recreate.
+#   A named volume is used (not a bind mount) so Docker applies the
+#   image's ownership (UID 1001) automatically.
+#
+# SWARM NOTE:
+#   Named volumes in Swarm are node-local. These three services are
+#   pinned to ore-dock-110-4 because their data volumes
+#   (timescale_data, redis_data, tracearr_images) only exist on that
+#   node. If the task is allowed to reschedule elsewhere, Swarm creates
+#   fresh empty volumes and the app comes up against an empty database.
+#   If the stack must move, first copy the volumes to the target node.
+
+services:
+  tracearr:
+    image: ghcr.io/connorgallopo/tracearr:latest
+    ports:
+      - "${PORT:-3030}:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - HOST=0.0.0.0
+      - TZ=${TZ:-America/Chicago}
+      - DATABASE_URL=postgres://tracearr:${DB_PASSWORD}@timescale:5432/tracearr
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=${JWT_SECRET}
+      - COOKIE_SECRET=${COOKIE_SECRET}
+      - CORS_ORIGIN=${CORS_ORIGIN:-*}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - tracearr_backups:/data/backup
+      - tracearr_images:/data/tracearr/image-cache
+    deploy:
+      placement:
+        constraints:
+          - node.hostname==ore-dock-110-4
+    networks:
+      - tracearr_tracearr-network
+
+  timescale:
+    image: timescale/timescaledb-ha:pg18.1-ts2.25.0
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    command: postgres -c timescaledb.license=timescale -c timescaledb.max_tuples_decompressed_per_dml_transaction=0 -c max_locks_per_transaction=4096 -c timescaledb.telemetry_level=off
+    environment:
+      - POSTGRES_USER=tracearr
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=tracearr
+    volumes:
+      - timescale_data:/home/postgres/pgdata/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tracearr"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      placement:
+        constraints:
+          - node.hostname==ore-dock-110-4
+    networks:
+      - tracearr_tracearr-network
+
+  redis:
+    image: redis:8-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      placement:
+        constraints:
+          - node.hostname==ore-dock-110-4
+    networks:
+      - tracearr_tracearr-network
+
+
+networks:
+  tracearr_tracearr-network:
+    external: true
+
+volumes:
+  tracearr_backups:
+    name: tracearr_tracearr_backups
+  tracearr_images:
+    name: tracearr_tracearr_images
+  timescale_data:
+    name: tracearr_timescale_data
+  redis_data:
+    name: tracearr_redis_data
